@@ -1,7 +1,7 @@
 {
-  "name": "stockadvisor",
-  "version": "2.3.1",
-  "description": "個人美股 AI 投顧助手",
+  "name": "stock-tw-ai",
+  "version": "1.0.0",
+  "description": "台股 AI 投顧助手",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

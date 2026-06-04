@@ -1,5 +1,5 @@
 /**
- * 美股 AI 投顧助手 - 後端服務
+ * 台股 AI 投顧助手 - 後端服務
  */
 
 require('dotenv').config();
@@ -12,25 +12,36 @@ const { spawn } = require('child_process');
 const { db, stmts } = require('./db');
 const { hashPassword, verifyPassword, signJWT, verifyJWT, authMiddleware, JWT_EXPIRY, checkRateLimit } = require('./auth');
 
-// 行業分類映射
+// 行業分類映射（台股）
 const SECTOR_MAP = {
-  'AAPL':'科技','MSFT':'科技','NVDA':'科技','AMD':'科技','GOOGL':'科技','GOOG':'科技',
-  'META':'通訊','NFLX':'通訊','DIS':'通訊','T':'通訊','VZ':'通訊','CMCSA':'通訊',
-  'AMZN':'消費','TSLA':'消費','WMT':'消費','COST':'消費','NKE':'消費','SBUX':'消費','MCD':'消費','TGT':'消費',
-  'JPM':'金融','V':'金融','BRK.B':'金融','GS':'金融','MS':'金融','BAC':'金融','AXP':'金融','C':'金融',
-  'UNH':'醫療','JNJ':'醫療','PFE':'醫療','MRK':'醫療','ABBV':'醫療','LLY':'醫療','MRNA':'醫療',
-  'XOM':'能源','CVX':'能源','COP':'能源','SLB':'能源',
-  'CAT':'工業','BA':'工業','HON':'工業','GE':'工業','MMM':'工業','UPS':'工業',
-  'LIN':'材料','APD':'材料','SHW':'材料','ECL':'材料',
-  'PLD':'地產','AMT':'地產','EQIX':'地產','SPG':'地產',
-  'NEE':'公用','DUK':'公用','SO':'公用','D':'公用',
+  // 半導體
+  '2330':'半導體','2317':'半導體','2454':'半導體','2303':'半導體','2881':'半導體',
+  '3711':'半導體','3034':'半導體','2379':'半導體','6669':'半導體','8046':'半導體',
+  // 電子零組件
+  '2395':'電子零組件','2498':'電子零組件','2409':'電子零組件','2412':'電子零組件',
+  // 電腦及週邊
+  '2357':'電腦週邊','2308':'電腦週邊','2382':'電腦週邊','3231':'電腦週邊',
+  // 通信網路
+  '2412':'通信網路','4904':'通信網路','3045':'通信網路','3694':'通信網路',
+  // 軟體服務
+  '2498':'軟體服務','4994':'軟體服務','3130':'軟體服務','6213':'軟體服務',
+  // 金融
+  '2881':'金融','2882':'金融','2884':'金融','2885':'金融','2886':'金融','2891':'金融',
+  '2892':'金融','5876':'金融','2883':'金融','2890':'金融',
+  // 傳產
+  '1301':'傳產','1303':'傳產','1326':'傳產','1216':'傳產','1201':'傳產',
+  '1802':'傳產','9910':'傳產','2207':'傳產','2610':'傳產',
+  // 光電
+  '3481':'光電','2409':'光電','3037':'光電','3450':'光電',
+  // 其他
+  '9917':'其他','8932':'其他',
 };
 
 function getSector(ticker) {
   return SECTOR_MAP[(ticker || '').toUpperCase()] || '其他';
 }
 
-const DEFAULT_SECTORS = ['科技','消費','金融','通訊','醫療','能源','工業','材料','地產','公用'];
+const DEFAULT_SECTORS = ['半導體','電子零組件','電腦週邊','通信網路','軟體服務','金融','傳產','光電','其他'];
 
 const app = express();
 const PORT = process.env.PORT || 3007;
@@ -38,7 +49,7 @@ const PORT = process.env.PORT || 3007;
 // AI Gateway 整合 — 所有 AI 請求透過 Gateway 轉發
 const GATEWAY_URL = process.env.GATEWAY_URL || 'http://127.0.0.1:3005';
 const GATEWAY_API_PATH = process.env.GATEWAY_API_PATH || '/api/query';
-const APP_ID = process.env.APP_ID || 'stock-ai';
+const APP_ID = process.env.APP_ID || 'stock-tw-ai';
 
 // 添加 `/api/moat/:ticker` 端點定義
 app.get('/api/moat/:ticker', async (req, res) => {
@@ -691,9 +702,9 @@ const KLINE_CACHE_TTL = 30 * 60 * 1000; // 30 分鐘
 const quotesCache = new Map(); // ticker -> { data, timestamp }
 const QUOTES_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 小時（美股交易時間外使用緩存）
 
-// 檢查是否在美股交易時間（正確版本！）
-// 美股常規交易時間：紐約時間 09:30-16:00 = UTC 13:30-20:00（夏令時）/ UTC 14:30-21:00（冬令時）
-function isUSMarketOpen() {
+// 檢查是否在台股交易時間
+// 台股交易時間：台北時間 09:00-13:30 = UTC 01:00-05:30
+function isTwMarketOpen() {
   const now = new Date();
   const day = now.getUTCDay(); // 0=週日, 1-5=週一到週五
   const hour = now.getUTCHours(); // UTC 小時
@@ -704,34 +715,19 @@ function isUSMarketOpen() {
     return false;
   }
   
-  // 夏令時（3月第二個週日到11月第一個週日）：UTC-4 = 紐約時間
-  // 冬令時：UTC-5 = 紐約時間
-  const year = now.getUTCFullYear();
-  const month = now.getUTCMonth() + 1;
-  const dateInMonth = now.getUTCDate();
-
-  // 分別計算3月和11月的第二/第一個週日
-  const march1st = new Date(Date.UTC(year, 2, 1)).getUTCDay();
-  const secondSundayMarch = march1st === 0 ? 8 : (15 - march1st); // 3月第二個週日
-  const nov1st = new Date(Date.UTC(year, 10, 1)).getUTCDay();
-  const firstSundayNov = nov1st === 0 ? 1 : (8 - nov1st); // 11月第一個週日
-
-  const isDST = (month > 3 && month < 11) || 
-                 (month === 3 && dateInMonth >= secondSundayMarch) || 
-                 (month === 11 && dateInMonth < firstSundayNov);
-  
-  const openHour = isDST ? 13 : 14; // UTC 13:30（夏令時）或 14:30（冬令時）開市
-  const closeHour = isDST ? 20 : 21; // UTC 20:00（夏令時）或 21:00（冬令時）收市
-  
-  // 轉換為分鐘數比較
+  // 台股交易時間：UTC 01:00-05:30（台北 09:00-13:30）
   const nowMinutes = hour * 60 + minute;
-  const openMinutes = openHour * 60 + 30;
-  const closeMinutes = closeHour * 60;
+  const openMinutes = 1 * 60; // UTC 01:00
+  const closeMinutes = 5 * 60 + 30; // UTC 05:30
   
-  // 只在同一天的交易時間內
   const isOpen = nowMinutes >= openMinutes && nowMinutes < closeMinutes;
   
   return isOpen;
+}
+
+// 保留舊函數名稱向後相容
+function isUSMarketOpen() {
+  return isTwMarketOpen();
 }
 
 app.get('/api/chart/:ticker', async (req, res) => {
@@ -807,7 +803,7 @@ async function fetchAlphaVantage(ticker) {
 
 // 系統提示 - 巴菲特與查理·芒格價值投資系統
 const SYSTEM_PROMPT = `# Role
-你是一位嚴格遵循巴菲特（Warren Buffett）與查理·芒格（Charlie Munger）價值投資哲學的資深量化與質化股票分析師。你的任務是依據極其严谨的基本面與估值指標，對用戶提供的美股個股數據進行程序化審視，並給出最終的操作評級與具體的止盈區間。
+你是一位嚴格遵循巴菲特（Warren Buffett）與查理·芒格（Charlie Munger）價值投資哲學的資深量化與質化股票分析師。你的任務是依據極其严谨的基本面與估值指標，對用戶提供的台股個股數據進行程序化審視，並給出最終的操作評級與具體的止盈區間。
 
 ## 核心理念
 「以合理的價格買入一家卓越的企業，並與之共同成長」
@@ -1359,24 +1355,23 @@ async function getStockPricesPythonBatch(tickers) {
   return results;
 }
 
-// 模擬股價數據（備用）- 更新至正確價格
+// 模擬股價數據（備用）- 台股主要股票
 const stockData = {
-  'AAPL': { name: 'Apple Inc.', price: 312.51, change: 1.66, changePercent: 0.53, prevClose: 310.85, high: 312.76, low: 309.57, volume: 44630908, pe: 28.5, eps: 8.93, marketCap: 3850000000000, week52High: 313.26, week52Low: 164.08 },
-  'MSFT': { name: 'Microsoft Corp.', price: 418.57, change: -1.15, changePercent: -0.27, prevClose: 419.72, high: 420.50, low: 417.20, volume: 18500000, pe: 35.2, eps: 12.10, marketCap: 3160000000000, week52High: 430.82, week52Low: 309.45 },
-  'GOOGL': { name: 'Alphabet Inc.', price: 178.90, change: 1.45, changePercent: 0.82, prevClose: 177.45, high: 180.20, low: 176.80, volume: 22100000, pe: 24.8, eps: 7.21, marketCap: 2200000000000, week52High: 191.75, week52Low: 121.46 },
-  'AMZN': { name: 'Amazon.com Inc.', price: 228.50, change: 4.80, changePercent: 2.15, prevClose: 223.70, high: 230.00, low: 224.50, volume: 35200000, pe: 45.6, eps: 5.01, marketCap: 2370000000000, week52High: 238.39, week52Low: 144.05 },
-  'NVDA': { name: 'NVIDIA Corp.', price: 194.94, change: -0.38, changePercent: -1.06, prevClose: 200.43, high: 208.50, low: 186.89, volume: 71683870, pe: 65.2, eps: 2.69, marketCap: 4320000000000, week52High: 208.50, week52Low: 47.32 },
-  'META': { name: 'Meta Platforms Inc.', price: 512.30, change: 8.90, changePercent: 1.77, prevClose: 503.40, high: 515.60, low: 501.20, volume: 15800000, pe: 32.1, eps: 15.95, marketCap: 1310000000000, week52High: 542.81, week52Low: 274.38 },
-  'TSLA': { name: 'Tesla Inc.', price: 198.98, change: 1.71, changePercent: 1.04, prevClose: 197.02, high: 214.33, low: 189.25, volume: 55488122, pe: 52.3, eps: 3.36, marketCap: 560000000000, week52High: 299.29, week52Low: 138.80 },
-  'AMD': { name: 'AMD Inc.', price: 158.40, change: 2.30, changePercent: 1.47, prevClose: 156.10, high: 160.50, low: 155.80, volume: 45600000, pe: 285.6, eps: 0.55, marketCap: 256000000000, week52High: 164.46, week52Low: 93.12 },
-  'NFLX': { name: 'Netflix Inc.', price: 628.90, change: 12.50, changePercent: 2.03, prevClose: 616.40, high: 632.00, low: 615.50, volume: 5200000, pe: 45.2, eps: 13.91, marketCap: 273000000000, week52High: 639.00, week52Low: 344.73 },
-  'BRK.B': { name: 'Berkshire Hathaway', price: 458.20, change: 1.80, changePercent: 0.39, prevClose: 456.40, high: 460.50, low: 455.80, volume: 2800000, pe: 9.2, eps: 49.80, marketCap: 780000000000, week52High: 468.00, week52Low: 362.59 },
-  'JPM': { name: 'JPMorgan Chase', price: 248.50, change: 3.20, changePercent: 1.30, prevClose: 245.30, high: 250.00, low: 245.50, volume: 8200000, pe: 11.8, eps: 21.05, marketCap: 715000000000, week52High: 253.94, week52Low: 170.10 },
-  'V': { name: 'Visa Inc.', price: 312.40, change: -1.10, changePercent: -0.35, prevClose: 313.50, high: 314.80, low: 311.20, volume: 6100000, pe: 30.5, eps: 10.24, marketCap: 645000000000, week52High: 318.71, week52Low: 227.68 },
-  'ARM': { name: 'ARM Holdings plc', price: 335.20, change: 5.60, changePercent: 1.70, prevClose: 329.60, high: 338.50, low: 328.10, volume: 12500000, pe: 85.2, eps: 3.93, marketCap: 135000000000, week52High: 342.10, week52Low: 85.40 },
-  'CI': { name: 'Cigna Group', price: 312.80, change: 2.40, changePercent: 0.77, prevClose: 310.40, high: 314.50, low: 309.20, volume: 3500000, pe: 18.5, eps: 16.91, marketCap: 82000000000, week52High: 320.10, week52Low: 225.60 },
-  'EPAM': { name: 'EPAM Systems', price: 328.50, change: 6.30, changePercent: 1.95, prevClose: 322.20, high: 331.20, low: 321.50, volume: 1800000, pe: 45.2, eps: 7.27, marketCap: 38000000000, week52High: 340.80, week52Low: 210.30 },
-  'GPRO': { name: 'GoPro Inc.', price: 4.25, change: 0.12, changePercent: 2.90, prevClose: 4.13, high: 4.35, low: 4.08, volume: 2500000, pe: 0, eps: -0.52, marketCap: 500000000, week52High: 5.85, week52Low: 3.20 }
+  '2330': { name: '台積電', price: 980.00, change: 15.00, changePercent: 1.56, prevClose: 965.00, high: 985.00, low: 960.00, volume: 45630908, pe: 28.5, eps: 34.42, marketCap: 25400000000000, week52High: 1080.00, week52Low: 570.00 },
+  '2317': { name: '鴻海', price: 175.50, change: 2.50, changePercent: 1.44, prevClose: 173.00, high: 177.00, low: 172.00, volume: 58500000, pe: 15.2, eps: 11.55, marketCap: 2430000000000, week52High: 205.00, week52Low: 105.00 },
+  '2454': { name: '聯發科', price: 1380.00, change: 25.00, changePercent: 1.85, prevClose: 1355.00, high: 1390.00, low: 1345.00, volume: 12100000, pe: 22.8, eps: 60.53, marketCap: 2320000000000, week52High: 1650.00, week52Low: 750.00 },
+  '2303': { name: '聯電', price: 52.80, change: 0.70, changePercent: 1.34, prevClose: 52.10, high: 53.20, low: 51.80, volume: 85200000, pe: 12.5, eps: 4.22, marketCap: 660000000000, week52High: 65.00, week52Low: 35.00 },
+  '2881': { name: '富邦金', price: 88.50, change: 0.60, changePercent: 0.68, prevClose: 87.90, high: 89.20, low: 87.50, volume: 35200000, pe: 14.2, eps: 6.23, marketCap: 1100000000000, week52High: 95.00, week52Low: 62.00 },
+  '2882': { name: '國泰金', price: 65.80, change: -0.20, changePercent: -0.30, prevClose: 66.00, high: 66.30, low: 65.50, volume: 28500000, pe: 18.5, eps: 3.56, marketCap: 950000000000, week52High: 72.00, week52Low: 45.00 },
+  '2412': { name: '中華電', price: 128.50, change: 1.20, changePercent: 0.94, prevClose: 127.30, high: 129.00, low: 127.00, volume: 15800000, pe: 26.8, eps: 4.79, marketCap: 990000000000, week52High: 135.00, week52Low: 105.00 },
+  '2357': { name: '華碩', price: 595.00, change: 8.00, changePercent: 1.36, prevClose: 587.00, high: 600.00, low: 582.00, volume: 5500000, pe: 18.2, eps: 32.69, marketCap: 440000000000, week52High: 680.00, week52Low: 380.00 },
+  '2308': { name: '台達電', price: 385.00, change: 5.50, changePercent: 1.45, prevClose: 379.50, high: 388.00, low: 377.00, volume: 8200000, pe: 21.5, eps: 17.91, marketCap: 1000000000000, week52High: 420.00, week52Low: 280.00 },
+  '3711': { name: '日月光投控', price: 158.50, change: 2.80, changePercent: 1.80, prevClose: 155.70, high: 160.00, low: 154.50, volume: 25000000, pe: 16.8, eps: 9.44, marketCap: 660000000000, week52High: 185.00, week52Low: 95.00 },
+  '3034': { name: '聯詠', price: 625.00, change: 12.00, changePercent: 1.96, prevClose: 613.00, high: 630.00, low: 610.00, volume: 3500000, pe: 15.5, eps: 40.32, marketCap: 340000000000, week52High: 720.00, week52Low: 380.00 },
+  '2379': { name: '瑞昱', price: 485.00, change: 7.50, changePercent: 1.57, prevClose: 477.50, high: 490.00, low: 475.00, volume: 6100000, pe: 20.2, eps: 24.01, marketCap: 240000000000, week52High: 550.00, week52Low: 280.00 },
+  '6669': { name: '緯創', price: 118.50, change: 1.80, changePercent: 1.54, prevClose: 116.70, high: 120.00, low: 116.00, volume: 12500000, pe: 12.8, eps: 9.26, marketCap: 340000000000, week52High: 140.00, week52Low: 70.00 },
+  '8046': { name: '南電', price: 268.00, change: 4.50, changePercent: 1.71, prevClose: 263.50, high: 270.00, low: 262.00, volume: 1800000, pe: 18.5, eps: 14.49, marketCap: 100000000000, week52High: 310.00, week52Low: 160.00 },
+  '2395': { name: '研華', price: 328.00, change: 5.00, changePercent: 1.55, prevClose: 323.00, high: 332.00, low: 320.00, volume: 3500000, pe: 22.8, eps: 14.39, marketCap: 160000000000, week52High: 380.00, week52Low: 220.00 }
 };
 
 // 報價 API：套用 v2.0.0 的 realtime_price.py 當前價格獲取方式；GET/POST 都支援，避免子路徑下 GET 被 SPA fallback 成 HTML。
@@ -1414,9 +1409,11 @@ function round(num, decimals = 2) {
   return Math.round(num * Math.pow(10, decimals)) / Math.pow(10, decimals);
 }
 
-// 市場指數 API（三大指數 + VIX）
+// 市場指數 API（台股指數）
 app.get('/api/market/indices', async (req, res) => {
-  const indices = ['SPY', 'QQQ', 'DIA', 'VIX'];
+  // 台股指數：加權指數(^TWII)、電子指數、金融指數
+  // Yahoo Finance ticker 格式：^TWII (加權)、^TELI (電子)、^TFNI (金融)
+  const indices = ['^TWII', '^TELI', '^TFNI'];
   const results = [];
   for (const t of indices) {
     const r = await getStockPricePython(t);
@@ -1424,10 +1421,9 @@ app.get('/api/market/indices', async (req, res) => {
       results.push({ ticker: t, ...r });
     } else {
       const fallback = {
-        SPY: { name: 'S&P 500', price: 592.50, change: 5.20, changePercent: 0.88 },
-        QQQ: { name: 'Nasdaq 100', price: 518.30, change: -3.10, changePercent: -0.60 },
-        DIA: { name: 'Dow Jones', price: 428.80, change: 1.50, changePercent: 0.35 },
-        VIX: { name: 'VIX 恐慌指數', price: 16.20, change: -0.80, changePercent: -4.71 },
+        '^TWII': { name: '加權指數', price: 21500.00, change: 85.20, changePercent: 0.40 },
+        '^TELI': { name: '電子指數', price: 1125.50, change: 12.30, changePercent: 1.10 },
+        '^TFNI': { name: '金融指數', price: 2185.80, change: -8.50, changePercent: -0.39 },
       };
       const fb = fallback[t];
       if (fb) results.push({ ticker: t, ...fb, source: 'demo', timestamp: Date.now() });
@@ -2197,7 +2193,7 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`📈 美股 AI 投顧助手已啟動（監聽: 0.0.0.0:${PORT}）`);
+  console.log(`📈 台股 AI 投顧助手已啟動（監聽: 0.0.0.0:${PORT}）`);
   console.log(`🔗 Gateway: ${GATEWAY_URL}`);
   console.log(`📱 App ID: ${APP_ID}`);
   console.log(`📊 巴菲特/芒格價值投資系統已就緒`);

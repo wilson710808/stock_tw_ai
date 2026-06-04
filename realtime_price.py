@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-實時股價 - Yahoo Finance 主導 + Twelve Data 備用
+台股實時股價 - Yahoo Finance 主導 + Twelve Data 備用
 支援：單股報價、批量報價、K線數據
+台股 ticker 格式：2330.TW 或 ^TWII（指數）
 """
 import sys
 import json
@@ -25,6 +26,9 @@ _UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 
 def _yahoo_chart(ticker, range='2d', interval='1d'):
     """Yahoo Finance chart API - 核心數據源"""
+    # 台股 ticker 格式轉換：2330 -> 2330.TW
+    if ticker and not ticker.startswith('^') and '.' not in ticker and ticker.isdigit():
+        ticker = f"{ticker}.TW"
     url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={range}&interval={interval}'
     req = urllib.request.Request(url, headers={'User-Agent': _UA})
     with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as response:

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>StockAI - 美股投顧助手</title>
+<title>Stock TW AI - 台股投顧助手</title>
 <script async src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" onerror="this.onerror=null;this.src='marked.min.js'"></script>
 <script async src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js" onerror="this.onerror=null;this.src='lightweight-charts.min.js'"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -124,7 +124,7 @@ body{font-family:'Noto Sans TC',-apple-system,BlinkMacSystemFont,sans-serif;back
 <!-- Header -->
 <header class="header">
  <div class="header-inner">
-  <div><div class="logo">Stock<span>AI</span><span id="appVersionTag" class="version-tag" title="Stock AI 版本">v2.0.0</span></div><div class="logo-sub">美股 AI 投顧助手</div></div>
+  <div><div class="logo">Stock<span>TW</span><span id="appVersionTag" class="version-tag" title="Stock TW AI 版本">v1.0.0</span></div><div class="logo-sub">台股 AI 投顧助手</div></div>
   <div id="userArea"><span id="aiCtxIndicator" style="display:none;font-size:11px;background:rgba(59,130,246,.15);color:#60a5fa;padding:3px 8px;border-radius:6px;margin-right:8px"></span>
    <button class="h-btn" id="loginBtn" onclick="showAuthModal()" style="font-size:13px;padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer">登錄</button>
   </div>
@@ -160,7 +160,7 @@ body{font-family:'Noto Sans TC',-apple-system,BlinkMacSystemFont,sans-serif;back
 <!-- Chat Page -->
 <main class="main page" id="chatPage">
  <div class="section-header" style="margin-bottom:16px"><h2 class="section-title">💬 提問分析師</h2></div>
- <div class="chat-messages" id="chatMessages"><div class="chat-msg ai">你好！我是 StockAI 投顧助手。有任何關於美股的問題，歡迎隨時問我！</div></div>
+ <div class="chat-messages" id="chatMessages"><div class="chat-msg ai">你好！我是 Stock TW AI 投顧助手。有任何關於台股的問題，歡迎隨時問我！</div></div>
  <div class="chat-input-box"><input type="text" class="chat-input" id="chatInput" placeholder="問關於股票、投資的問題..."><button class="chat-send" id="chatSend">➤</button></div>
 </main>
 
@@ -217,7 +217,7 @@ body{font-family:'Noto Sans TC',-apple-system,BlinkMacSystemFont,sans-serif;back
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
-<!-- StockAI v2.3.1 模組化腳本載入 -->
+<!-- Stock TW AI v1.0.0 模組化腳本載入 -->
 <script src="app-config.js?v=20260603031"></script>
 <script src="app-utils.js?v=20260603031"></script>
 <script src="app-auth.js?v=20260603031"></script>

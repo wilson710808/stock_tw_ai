@@ -1,83 +1,68 @@
 #!/usr/bin/env python3
 """
-收集 Investing.com 績優美股推薦
+台股績優股票推薦
 按行業板塊提供 TOP5
 """
 import json
 import time
 
-# 預設的績優股列表（按行業板塊）
-# 來源：Investing.com 常見板塊龍頭 + 市場公認的優質標的
+# 台股預設的績優股列表（按行業板塊）
+# 來源：台股各產業龍頭 + 市場公認的優質標的
 RECOMMEND_STOCKS = {
-    "科技": [
-        {"ticker": "AAPL", "name": "Apple Inc.", "reason": "全球消費電子龍頭，強大品牌護城河"},
-        {"ticker": "MSFT", "name": "Microsoft Corp.", "reason": "軟體與雲端服務龍頭，穩定現金流"},
-        {"ticker": "NVDA", "name": "NVIDIA Corp.", "reason": "AI晶片龍頭，技術護城河寬闊"},
-        {"ticker": "GOOGL", "name": "Alphabet Inc.", "reason": "搜尋與廣告龍頭，AI布局領先"},
-        {"ticker": "AMZN", "name": "Amazon.com Inc.", "reason": "電商與雲端龍頭，規模優勢顯著"}
+    "半導體": [
+        {"ticker": "2330", "name": "台積電", "reason": "全球晶圓代工龍頭，技術護城河寬闊"},
+        {"ticker": "2317", "name": "鴻海", "reason": "全球電子代工龍頭，AI伺服器領先"},
+        {"ticker": "2454", "name": "聯發科", "reason": "手機晶片龍頭，車用晶片布局領先"},
+        {"ticker": "2303", "name": "聯電", "reason": "成熟製程晶圓代工，產能利用率高"},
+        {"ticker": "3711", "name": "日月光投控", "reason": "全球封測龍頭，先進封裝領先"}
     ],
-    "消費": [
-        {"ticker": "COST", "name": "Costco Wholesale", "reason": "會員制量販龍頭，客戶忠誠度高"},
-        {"ticker": "WMT", "name": "Walmart Inc.", "reason": "全球零售龍頭，成本控制優秀"},
-        {"ticker": "MCD", "name": "McDonald's Corp.", "reason": "餐飲連鎖龍頭，品牌價值高"},
-        {"ticker": "NKE", "name": "Nike Inc.", "reason": "運動品牌龍頭，全球營運"},
-        {"ticker": "SBUX", "name": "Starbucks Corp.", "reason": "咖啡連鎖龍頭，會員體系強大"}
+    "電子零組件": [
+        {"ticker": "2395", "name": "研華", "reason": "工業電腦龍頭，物聯網布局領先"},
+        {"ticker": "2498", "name": "宏達電", "reason": "VR/AR領先，元宇宙布局"},
+        {"ticker": "2409", "name": "友達", "reason": "面板雙雄之一，車用面板領先"},
+        {"ticker": "3481", "name": "群創", "reason": "面板雙雄之一，大尺寸面板領先"},
+        {"ticker": "3034", "name": "聯詠", "reason": "驅動IC龍頭，OLED布局領先"}
+    ],
+    "電腦週邊": [
+        {"ticker": "2357", "name": "華碩", "reason": "主機板與電競筆電龍頭"},
+        {"ticker": "2308", "name": "台達電", "reason": "電源管理龍頭，電動車布局領先"},
+        {"ticker": "2382", "name": "廣達", "reason": "筆電代工龍頭，AI伺服器領先"},
+        {"ticker": "6669", "name": "緯創", "reason": "筆電代工大廠，伺服器布局領先"},
+        {"ticker": "3231", "name": "緯創", "reason": "伺服器代工大廠"}
+    ],
+    "通信網路": [
+        {"ticker": "2412", "name": "中華電", "reason": "電信信龍頭，穩定現金流"},
+        {"ticker": "4904", "name": "遠傳", "reason": "電信三雄之一，5G布局領先"},
+        {"ticker": "3045", "name": "台灣大", "reason": "電信三雄之一，併購綜效顯現"},
+        {"ticker": "3694", "name": "海華", "reason": "網通設備大廠"},
+        {"ticker": "3158", "name": "正文", "reason": "無線網通設備領先"}
     ],
     "金融": [
-        {"ticker": "JPM", "name": "JPMorgan Chase", "reason": "銀行業龍頭，風險管理優秀"},
-        {"ticker": "V", "name": "Visa Inc.", "reason": "支付龍頭，網絡效應強大"},
-        {"ticker": "MA", "name": "Mastercard Inc.", "reason": "支付龍頭，全球網絡布局"},
-        {"ticker": "BAC", "name": "Bank of America", "reason": "全國性銀行，多元化業務"},
-        {"ticker": "BRK.B", "name": "Berkshire Hathaway", "reason": "巴菲特旗下投資公司，價值投資典範"}
+        {"ticker": "2881", "name": "富邦金", "reason": "金控獲利王，壽險與銀行雙引擎"},
+        {"ticker": "2882", "name": "國泰金", "reason": "金控龍頭，壽險業績穩定"},
+        {"ticker": "2884", "name": "玉山金", "reason": "銀行業務領先，數位轉型成功"},
+        {"ticker": "2885", "name": "元大金", "reason": "證券龍頭，ETF業務領先"},
+        {"ticker": "2891", "name": "中信金", "reason": "銀行與壽險雙核心，海外布局領先"}
     ],
-    "醫療": [
-        {"ticker": "JNJ", "name": "Johnson & Johnson", "reason": "醫療健康龍頭，產品線多元"},
-        {"ticker": "UNH", "name": "UnitedHealth Group", "reason": "醫療保險與服務龍頭"},
-        {"ticker": "MRK", "name": "Merck & Co.", "reason": "製藥龍頭，研發能力強"},
-        {"ticker": "ABBV", "name": "AbbVie Inc.", "reason": "專科製藥，產品線強勁"},
-        {"ticker": "LLY", "name": "Eli Lilly & Co.", "reason": "製藥龍頭，創新能力強"}
+    "傳產": [
+        {"ticker": "1301", "name": "台塑", "reason": "塑化龍頭，上下游整合完整"},
+        {"ticker": "1303", "name": "南亞", "reason": "塑化大廠，產品線多元"},
+        {"ticker": "1326", "name": "台化", "reason": "塑化大廠，一貫作業優勢"},
+        {"ticker": "1216", "name": "統一", "reason": "食品龍頭，通路布局領先"},
+        {"ticker": "1802", "name": "台玻", "reason": "玻璃龍頭，建築與汽車市場領先"}
     ],
-    "能源": [
-        {"ticker": "XOM", "name": "Exxon Mobil", "reason": "能源龍頭，上下游整合"},
-        {"ticker": "CVX", "name": "Chevron Corp.", "reason": "能源龍頭，股息穩定"},
-        {"ticker": "COP", "name": "ConocoPhillips", "reason": "勘探與生產，成本控制優秀"},
-        {"ticker": "SLB", "name": "Schlumberger Ltd.", "reason": "油田服務龍頭，技術領先"},
-        {"ticker": "PXD", "name": "Pioneer Natural", "reason": "頁岩油生產，成本優勢"}
+    "光電": [
+        {"ticker": "3481", "name": "群創", "reason": "面板大廠，車用與商用顯示器領先"},
+        {"ticker": "2409", "name": "友達", "reason": "面板大廠，Micro LED布局領先"},
+        {"ticker": "3037", "name": "欣興", "reason": "PCB大廠，IC載板領先"},
+        {"ticker": "3450", "name": "聯茂", "reason": "銅箔基板大廠，高速材料領先"}
     ],
-    "工業": [
-        {"ticker": "CAT", "name": "Caterpillar Inc.", "reason": "工程機械龍頭，全球佈局"},
-        {"ticker": "BA", "name": "Boeing Co.", "reason": "航太國防龍頭，訂單充裕"},
-        {"ticker": "HON", "name": "Honeywell Intl.", "reason": "工業自動化龍頭，技術領先"},
-        {"ticker": "GE", "name": "General Electric", "reason": "工業集團，轉型成效顯現"},
-        {"ticker": "UPS", "name": "United Parcel", "reason": "物流快遞龍頭，全球網絡"}
-    ],
-    "通訊": [
-        {"ticker": "META", "name": "Meta Platforms", "reason": "社交媒體龍頭，元宇宙佈局"},
-        {"ticker": "NFLX", "name": "Netflix Inc.", "reason": "串流媒體龍頭，內容優勢"},
-        {"ticker": "DIS", "name": "Walt Disney Co.", "reason": "娛樂媒體龍頭，IP價值高"},
-        {"ticker": "T", "name": "AT&T Inc.", "reason": "電信服務商，股息穩定"},
-        {"ticker": "VZ", "name": "Verizon Comm.", "reason": "電信服務商，網絡優質"}
-    ],
-    "材料": [
-        {"ticker": "LIN", "name": "Linde plc", "reason": "工業氣體龍頭，全球佈局"},
-        {"ticker": "APD", "name": "Air Products & Chem.", "reason": "工業氣體龍頭，技術領先"},
-        {"ticker": "SHW", "name": "Sherwin-Williams", "reason": "塗料龍頭，品牌優勢"},
-        {"ticker": "ECL", "name": "Ecolab Inc.", "reason": "水處理與清潔方案龍頭"},
-        {"ticker": "NUE", "name": "Nucor Corp.", "reason": "鋼鐵生產，成本優勢"}
-    ],
-    "地產": [
-        {"ticker": "PLD", "name": "Prologis Inc.", "reason": "物流地產龍頭，全球布局"},
-        {"ticker": "AMT", "name": "American Tower", "reason": "電信塔REITs，現金流穩定"},
-        {"ticker": "EQIX", "name": "Equinix Inc.", "reason": "數據中心REITs，全球布局"},
-        {"ticker": "SPG", "name": "Simon Property", "reason": "商場REITs，高質量資產"},
-        {"ticker": "O", "name": "Realty Income", "reason": "月付股息REITs，資產質量優"}
-    ],
-    "公用": [
-        {"ticker": "NEE", "name": "NextEra Energy", "reason": "電力公用事業，新能源布局"},
-        {"ticker": "D", "name": "Dominion Energy", "reason": "電力與天然氣公用事業"},
-        {"ticker": "SO", "name": "Southern Co.", "reason": "電力公用事業，股息穩定"},
-        {"ticker": "DUK", "name": "Duke Energy", "reason": "電力公用事業，區域龍頭"},
-        {"ticker": "EXC", "name": "Exelon Corp.", "reason": "電力公用事業，多元發電"}
+    "其他": [
+        {"ticker": "9917", "name": "中保科", "reason": "保全龍頭，智慧居家布局領先"},
+        {"ticker": "8932", "name": "智邦", "reason": "網通設備大廠，AI交換器領先"},
+        {"ticker": "2610", "name": "華航", "reason": "航空龍頭，貨運業務領先"},
+        {"ticker": "2207", "name": "和泰車", "reason": "汽車銷售龍頭，電動車布局領先"},
+        {"ticker": "9910", "name": "豐泰", "reason": "鞋類代工大廠，客戶關係穩定"}
     ]
 }
 
@@ -87,7 +72,7 @@ def get_recommended_stocks():
         "success": True,
         "sectors": RECOMMEND_STOCKS,
         "updated": int(time.time()),
-        "source": "Investing.com 常見板塊龍頭 + 市場公認優質標的"
+        "source": "台股各產業龍頭 + 市場公認優質標的"
     }
 
 if __name__ == "__main__":

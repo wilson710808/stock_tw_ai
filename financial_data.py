@@ -27,6 +27,9 @@ _UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 def _yahoo_financials(ticker, statement_type='income'):
     """獲取財務報表（損益表/資產負債表/現金流量表）"""
     try:
+        # 台股 ticker 格式轉換：2330 -> 2330.TW
+        if ticker and not ticker.startswith('^') and '.' not in ticker and ticker.isdigit():
+            ticker = f"{ticker}.TW"
         # 使用 Yahoo Finance API
         # statement_type: income, balance, cash
         url = f'https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=financialData,incomeStatementHistory,balanceSheetHistory,cashflowStatementHistory'
