@@ -741,18 +741,28 @@ app.get('/api/chart/:ticker', async (req, res) => {
     return res.json({ ...cached.data, cached: true });
   }
 
-  // 使用 Python 爬蟲獲取 K 線（EODHD → Yahoo → Twelve Data → 模擬）
+  // 使用 market_data.py 獲取 K 線（本地 CSV 優先 > TWSE MIS API > 模擬）
   const result = await new Promise((resolve) => {
-    const python = spawn('python3', [path.join(__dirname, 'realtime_price.py'), ticker, '--kline']);
+    const python = spawn('python3', [path.join(__dirname, 'market_data.py'), ticker]);
     let data = '';
     python.stdout.on('data', (chunk) => { data += chunk; });
-    python.stderr.on('data', (chunk) => { console.error('K線爬蟲錯誤:', chunk.toString()); });
+    python.stderr.on('data', (chunk) => { console.error('K線錯誤:', chunk.toString()); });
     python.on('close', (code) => {
       if (code === 0 && data) {
-        try { resolve(JSON.parse(data)); }
-        catch (e) { resolve({ success: false, error: '解析失敗' }); }
+        try {
+          const candles = JSON.parse(data);
+          resolve({
+            success: true,
+            ticker: ticker,
+            candles: candles,
+            source: 'local_csv',
+            note: '從 market_data.py 獲取（本地 CSV 或模擬）'
+          });
+        } catch (e) {
+          resolve({ success: false, error: '解析失敗: ' + e.message });
+        }
       } else {
-        resolve({ success: false, error: '爬蟲執行失敗' });
+        resolve({ success: false, error: 'market_data.py 執行失敗' });
       }
     });
   });
@@ -1470,21 +1480,24 @@ app.get('/api/market/indices', async (req, res) => {
 // 推薦股票 API
 app.get('/api/recommend', async (req, res) => {
   try {
-    const python = spawn('python3', [path.join(__dirname, 'recommend_stocks.py')]);
-    let data = '';
-    python.stdout.on('data', (chunk) => { data += chunk; });
-    python.on('close', (code) => {
-      if (code === 0 && data) {
-        try {
-          const result = JSON.parse(data);
-          res.json(result);
-        } catch (e) {
-          res.json({ success: false, error: '解析失敗' });
-        }
-      } else {
-        res.json({ success: false, error: '獲取失敗' });
+    // 直接讀取 data/recommendations.json (由 recommend_stocks.py 生成)
+    const fs = require('fs');
+    const path = require('path');
+    const recFile = path.join(__dirname, 'data', 'recommendations.json');
+    
+    if (!fs.existsSync(recFile)) {
+      // 若檔案不存在，執行 Python 生成
+      const { execSync } = require('child_process');
+      try {
+        execSync(`python3 "${path.join(__dirname, 'recommend_stocks.py')}" > "${recFile}"`, { cwd: __dirname });
+      } catch (e) {
+        return res.json({ success: false, error: '推薦數據生成失敗' });
       }
-    });
+    }
+    
+    const data = fs.readFileSync(recFile, 'utf8');
+    const result = JSON.parse(data);
+    res.json(result);
   } catch (e) {
     res.json({ success: false, error: e.message });
   }
