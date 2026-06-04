@@ -1,46 +1,58 @@
 #!/usr/bin/env python3
 """
-market_overview.py - 台股大盤概覽（上漲/下跌家數、成交量）
-
-功能：
-1. 獲取市場大盤概覽（上漲/下跌/平盤家數）
-2. 大盤指數（加權/電子/金融）
-3. 成交金額（單位：億元）
-4. 外資買賣超（未來擴充）
+market_overview.py - 台股大盤概覽（真實數據版）
 
 數據源：
-- TWSE MIS API (即時)
-- TWSE FMTQIK API (大盤統計)
+- TWSE MIS API: 即時指數
+- TWSE OpenAPI STOCK_DAY_ALL: 漲跌家數
+- TWSE OpenAPI FMTQIK: 成交金額、大盤統計
 """
 
 import json
 import urllib.request
 import ssl
+import sys
 from datetime import datetime
 
+_ctx = ssl.create_default_context()
+_ctx.check_hostname = False
+_ctx.verify_mode = ssl.CERT_NONE
+
+_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+    'Accept': 'application/json',
+    'If-Modified-Since': '0'
+}
+
+def _fetch_json(url, timeout=15):
+    req = urllib.request.Request(url, headers=_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ctx) as resp:
+            raw = resp.read()
+            return json.loads(raw.decode('utf-8'))
+    except Exception as e:
+        sys.stderr.write(f'[market_overview] fetch failed: {url} → {e}\n')
+        return None
+
+def _safe_float(val):
+    if not val or val in ('--', 'X', ''):
+        return 0.0
+    try:
+        return float(str(val).replace(',', ''))
+    except:
+        return 0.0
+
 # ============================================
-# 1. 市場大盤概覽
+# 市場大盤概覽
 # ============================================
 
 def get_market_overview():
     """
     獲取市場大盤概覽
-    返回: {
-      success: bool,
-      timestamp: ISO,
-      indices: { twii, electronic, financial },
-      stocks: { advance, decline, unchanged, total },
-      volume: { amount: 億元, unit: '億元' },
-      note: string
-    }
+    返回: { success, timestamp, indices, stocks, volume }
     """
-    # 獲取三大指數
     indices = _get_indices()
-    
-    # 獲取上漲/下跌家數（模拟數據，實際需要 TWSE FMTQIK API）
     stocks = _get_advance_decline()
-    
-    # 獲取成交金額（模拟數據）
     volume = _get_market_volume()
     
     return {
@@ -48,110 +60,118 @@ def get_market_overview():
         'timestamp': datetime.now().isoformat(),
         'indices': indices,
         'stocks': stocks,
-        'volume': volume,
-        'note': '市場大盤概覽（部分數據為模擬）'
+        'volume': volume
     }
 
 def _get_indices():
-    """獲取三大指數"""
+    """獲取三大指數（TWSE MIS API — 一次請求三個指數）"""
     indices = {}
     
-    # 加權指數
-    url = 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&json=1&delay=0'
-    data = _fetch_twse_api(url)
-    if data and data.get('msgArray'):
-        msg = data['msgArray'][0]
-        indices['twii'] = {
-            'price': float(msg.get('z', 0)),
-            'change': float(msg.get('a', 0)),
-            'changePercent': float(msg.get('b', 0))
-        }
+    # 合併三個指數為一次 API 請求
+    ex_ch = 'tse_t00.tw|tse_t13.tw|tse_t17.tw'
+    url = f'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0'
+    data = _fetch_json(url, timeout=8)
     
-    # 電子類指數
-    url = 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t13.tw&json=1&delay=0'
-    data = _fetch_twse_api(url)
     if data and data.get('msgArray'):
-        msg = data['msgArray'][0]
-        indices['electronic'] = {
-            'price': float(msg.get('z', 0)),
-            'change': float(msg.get('a', 0)),
-            'changePercent': float(msg.get('b', 0))
-        }
-    
-    # 金融保險類指數
-    url = 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t17.tw&json=1&delay=0'
-    data = _fetch_twse_api(url)
-    if data and data.get('msgArray'):
-        msg = data['msgArray'][0]
-        indices['financial'] = {
-            'price': float(msg.get('z', 0)),
-            'change': float(msg.get('a', 0)),
-            'changePercent': float(msg.get('b', 0))
-        }
+        key_map = {'t00': 'twii', 't13': 'electronic', 't17': 'financial'}
+        for msg in data['msgArray']:
+            ch = msg.get('ch', '')
+            for code, key in key_map.items():
+                if code in ch:
+                    z = _safe_float(msg.get('z', 0))
+                    y = _safe_float(msg.get('y', 0))
+                    indices[key] = {
+                        'price': z,
+                        'change': round(z - y, 2),
+                        'changePercent': round((z - y) / y * 100, 2) if y > 0 else 0
+                    }
+                    break
     
     return indices
 
 def _get_advance_decline():
     """
-    獲取上漲/下跌家數
-    ⚠️ 注意：TWSE FMTQIK API 需要解析 HTML，目前使用模擬數據
-    未來可改為真實數據
+    從 TWSE OpenAPI STOCK_DAY_ALL 計算漲跌家數（真實數據）
     """
-    # 模擬數據（基於典型分布）
-    import random
-    total = 1740  # 上市 + 上櫃約 1740 家
-    advance = random.randint(800, 1000)
-    decline = random.randint(500, 700)
-    unchanged = total - advance - decline
+    data = _fetch_json('https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL', timeout=15)
+    
+    if not data or not isinstance(data, list):
+        sys.stderr.write('[market_overview] STOCK_DAY_ALL 無數據，使用模擬\n')
+        import random
+        total = 1740
+        advance = random.randint(800, 1000)
+        decline = random.randint(500, 700)
+        return {
+            'advance': advance,
+            'decline': decline,
+            'unchanged': total - advance - decline,
+            'total': total,
+            'source': 'simulated'
+        }
+    
+    advance = 0
+    decline = 0
+    unchanged = 0
+    total_valid = 0
+    
+    for row in data:
+        close = _safe_float(row.get('ClosingPrice'))
+        open_p = _safe_float(row.get('OpeningPrice'))
+        
+        if close <= 0 or open_p <= 0:
+            continue
+        
+        total_valid += 1
+        if close > open_p:
+            advance += 1
+        elif close < open_p:
+            decline += 1
+        else:
+            unchanged += 1
     
     return {
         'advance': advance,
         'decline': decline,
         'unchanged': unchanged,
-        'total': total,
-        'advancePercent': round(advance / total * 100, 1),
-        'declinePercent': round(decline / total * 100, 1)
+        'total': total_valid,
+        'advancePercent': round(advance / total_valid * 100, 1) if total_valid > 0 else 0,
+        'declinePercent': round(decline / total_valid * 100, 1) if total_valid > 0 else 0,
+        'source': 'openapi'
     }
 
 def _get_market_volume():
     """
-    獲取大盤成交金額
-    ⚠️ 注意：需要從 TWSE API 獲取，目前使用模擬數據
+    從 TWSE OpenAPI FMTQIK 取得成交金額（真實數據）
     """
-    # 模擬數據（台股日均成交約 3000-4000 億元）
-    import random
-    amount = random.randint(3000, 4500)
+    data = _fetch_json('https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK', timeout=15)
+    
+    if not data or not isinstance(data, list) or len(data) == 0:
+        sys.stderr.write('[market_overview] FMTQIK 無數據，使用模擬\n')
+        import random
+        return {'amount': random.randint(3000, 4500), 'unit': '億元', 'source': 'simulated'}
+    
+    # 取最近一天
+    latest = data[-1]
+    trade_value = _safe_float(latest.get('TradeValue', 0))
+    # TradeValue 單位是元，轉換為億元
+    amount_yi = round(trade_value / 100000000, 1) if trade_value > 0 else 0
+    
+    # 也取大盤指數
+    taiex = _safe_float(latest.get('TAIEX', 0))
+    change = _safe_float(latest.get('Change', 0))
     
     return {
-        'amount': amount,
-        'unit': '億元'
+        'amount': amount_yi,
+        'unit': '億元',
+        'taiex': taiex,
+        'taiexChange': change,
+        'source': 'openapi'
     }
 
-def _fetch_twse_api(url):
-    """通用 TWSE API 請求"""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    
-    req = urllib.request.Request(url, headers={
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': 'https://mis.twse.com.tw/'
-    })
-    
-    try:
-        with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
-            return json.loads(resp.read().decode('utf-8'))
-    except Exception as e:
-        print(f'[市場大盤] API 請求失敗: {e}')
-        return None
-
 # ============================================
-# 2. CLI 測試
+# CLI 測試
 # ============================================
 
 if __name__ == '__main__':
-    import sys
-    import json
-    
     overview = get_market_overview()
     print(json.dumps(overview, ensure_ascii=False, indent=2))

@@ -14,3 +14,17 @@ stockai.db-*
 __pycache__/
 
 .kline_cache/
+data/historical/*.csv
+!data/historical/2330.csv
+!data/historical/2317.csv
+!data/historical/2454.csv
+!data/historical/2881.csv
+!data/historical/1301.csv
+!data/historical/2303.csv
+!data/historical/3711.csv
+!data/historical/2882.csv
+!data/historical/2603.csv
+!data/historical/2412.csv
+!data/historical/2002.csv
+!data/historical/1101.csv
+!data/historical/5880.csv

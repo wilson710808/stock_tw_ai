@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-market_data.py - 台股數據獲取模組（本地優先 + TWSE CSV 歷史 K 線 + MIS API 即時）
+market_data.py - 台股數據獲取模組（TWSE OpenAPI + MIS API）
 
 功能：
-1. 歷史 K 線 — 從 TWSE STOCK_DAY CSV 下載並解析（真實數據）
+1. 歷史 K 線 — 從 TWSE OpenAPI (STOCK_DAY_ALL) 取當日數據，累積到本地 CSV
 2. 即時報價 — 透過 TWSE MIS API
-3. 推薦股票 — 讀取 recommendations.json
-4. 市場大盤 — 上漲/下跌家數、成交量（未來擴充）
-5. 個股基本面 — P/E、殖利率（未來擴充）
+3. 更新當日 K 線 — 每日收盤後呼叫
 
-優先順序：本地 CSV > TWSE STOCK_DAY CSV > 模擬數據
+優先順序：本地 CSV > TWSE OpenAPI > MIS API 即時 > 模擬數據
+
+TWSE OpenAPI 端點（可從 Mac mini 連線）：
+- STOCK_DAY_ALL: https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL
+  返回所有上市股票當日 OHLCV，民國年日期格式 (1150603 = 2026/06/03)
+- FMTQIK: https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK
+  返回大盤統計（成交值/指數）
 """
 
 import json
@@ -21,310 +25,339 @@ import ssl
 from datetime import datetime, timedelta
 import random
 import time
-import sys
 
 # ============================================
-# 1. 歷史 K 線 (優先從 TWSE CSV 讀取)
+# 共用 SSL 與 HTTP 工具
+# ============================================
+
+_ctx = ssl.create_default_context()
+_ctx.check_hostname = False
+_ctx.verify_mode = ssl.CERT_NONE
+
+_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+    'Accept': 'application/json',
+    'If-Modified-Since': '0'
+}
+
+def _fetch_json(url, timeout=15):
+    """通用 JSON API 請求"""
+    req = urllib.request.Request(url, headers=_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ctx) as resp:
+            raw = resp.read()
+            return json.loads(raw.decode('utf-8'))
+    except Exception as e:
+        sys.stderr.write(f'[market_data] fetch failed: {url} → {e}\n')
+        return None
+
+def _roc_to_ad(roc_date_str):
+    """民國年日期轉西元 (1150603 → 20260603 → datetime)"""
+    try:
+        roc = int(roc_date_str)
+        year = roc // 10000 + 1911
+        rest = roc % 10000
+        month = rest // 100
+        day = rest % 100
+        return datetime(year, month, day)
+    except:
+        return None
+
+def _safe_float(val):
+    """安全轉 float，處理空字串和千分位逗號"""
+    if not val or val in ('--', 'X', ''):
+        return 0.0
+    try:
+        return float(str(val).replace(',', ''))
+    except:
+        return 0.0
+
+# ============================================
+# 1. TWSE OpenAPI: STOCK_DAY_ALL（當日全部上市股票）
+# ============================================
+
+_openapi_cache = {}
+_openapi_cache_time = 0
+
+def _fetch_stock_day_all():
+    """
+    從 TWSE OpenAPI 取得當日全部上市股票數據
+    有 60 秒快取，避免過度請求
+    """
+    global _openapi_cache, _openapi_cache_time
+    
+    now = time.time()
+    if _openapi_cache and (now - _openapi_cache_time) < 60:
+        return _openapi_cache
+    
+    data = _fetch_json('https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL')
+    if data and isinstance(data, list):
+        _openapi_cache = data
+        _openapi_cache_time = now
+        return data
+    return _openapi_cache or None
+
+def _get_today_from_openapi(ticker):
+    """
+    從 STOCK_DAY_ALL 取得單一股票當日 OHLCV
+    返回: { date, open, high, low, close, volume } 或 None
+    """
+    ticker = ticker.replace('.TW', '')
+    data = _fetch_stock_day_all()
+    if not data:
+        return None
+    
+    for row in data:
+        if row.get('Code') == ticker:
+            close = _safe_float(row.get('ClosingPrice'))
+            if close <= 0:
+                return None
+            dt = _roc_to_ad(row.get('Date', ''))
+            return {
+                'date': dt,
+                'timestamp': int(dt.timestamp()) if dt else 0,
+                'open': _safe_float(row.get('OpeningPrice')),
+                'high': _safe_float(row.get('HighestPrice')),
+                'low': _safe_float(row.get('LowestPrice')),
+                'close': close,
+                'volume': int(_safe_float(row.get('TradeVolume'))),
+                'source': 'openapi'
+            }
+    return None
+
+# ============================================
+# 2. 歷史 K 線
 # ============================================
 
 def get_historical_kline(ticker, days=60):
     """
-    獲取歷史 K 線
-    1. 先嘗試從 data/historical/{ticker}.csv 讀取
-    2. 若不存在，從 TWSE STOCK_DAY CSV 下載並解析
-    3. 若 TWSE 失敗，生成模擬數據並保存
+    獲取歷史 K 線（快速模式，只用本地 CSV + MIS API 即時）
+    
+    ⚠️ 不主動呼叫 OpenAPI STOCK_DAY_ALL（1.2MB JSON 會超時）
+    OpenAPI 更新由 batch_update_from_openapi() 定時任務處理
+    
+    優先順序：本地 CSV → MIS API 即時補充 → 模擬數據
     """
     ticker = ticker.replace('.TW', '')
-    csv_path = os.path.join(os.path.dirname(__file__), 'data', 'historical', f'{ticker}.csv')
+    csv_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'historical')
+    csv_path = os.path.join(csv_dir, f'{ticker}.csv')
     
-    # 1. 嘗試讀取本地 CSV
+    # 1. 讀取本地 CSV
+    candles = []
     if os.path.exists(csv_path):
-        sys.stderr.write(f'[K線] 從本地 CSV 讀取: {ticker}')
-        return _read_kline_csv(csv_path)
+        candles = _read_kline_csv(csv_path)
+        sys.stderr.write(f'[K線] 本地 CSV: {ticker}, {len(candles)} 根\n')
     
-    # 2. 從 TWSE STOCK_DAY 下載
-    sys.stderr.write(f'[K線] 本地 CSV 不存在，從 TWSE 下載: {ticker}')
-    candles = _download_twse_stock_day(ticker, days)
-    if candles and len(candles) > 0:
-        # 保存到本地 CSV
-        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-        with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=['time', 'open', 'high', 'low', 'close', 'volume'])
-            writer.writeheader()
-            writer.writerows(candles)
-        sys.stderr.write(f'[K線] TWSE CSV 下載成功並保存: {csv_path} ({len(candles)} 天)')
-        return candles
+    # 2. 用 MIS API 快速補充當日數據（輕量，<1KB）
+    if not candles or (candles and _is_stale(candles)):
+        quote = get_realtime_quote(ticker)
+        if quote.get('success') and quote.get('price', 0) > 0:
+            today = datetime.now().date()
+            today_ts = int(datetime.combine(today, datetime.min.time()).timestamp())
+            
+            already_has_today = any(c['time'] == today_ts for c in candles)
+            
+            today_candle = {
+                'time': today_ts,
+                'open': quote['open'],
+                'high': quote['high'],
+                'low': quote['low'],
+                'close': quote['price'],
+                'volume': quote['volume']
+            }
+            
+            if already_has_today:
+                for i, c in enumerate(candles):
+                    if c['time'] == today_ts:
+                        candles[i] = today_candle
+                        break
+            else:
+                candles.append(today_candle)
+            
+            sys.stderr.write(f'[K線] MIS API 補充當日: {ticker} close={quote["price"]}\n')
     
-    # 3. 失敗 → 生成模擬數據
-    sys.stderr.write(f'[K線] TWSE CSV 下載失敗，生成模擬數據: {ticker}')
+    # 3. 有數據就保存並返回
+    if candles:
+        candles = _deduplicate_sort(candles)
+        os.makedirs(csv_dir, exist_ok=True)
+        _save_kline_csv(csv_path, candles)
+        return candles[-days:]
+    
+    # 4. 無數據 → 模擬
+    sys.stderr.write(f'[K線] 無數據，生成模擬: {ticker}\n')
     return _generate_simulated_kline(ticker, days, csv_path)
+
+def _is_stale(candles):
+    """檢查 K 線數據是否過時（最新一根不是今天或昨天）"""
+    if not candles:
+        return True
+    latest_ts = candles[-1]['time']
+    latest_date = datetime.fromtimestamp(latest_ts).date()
+    today = datetime.now().date()
+    return (today - latest_date).days > 1
 
 def _read_kline_csv(csv_path):
     """讀取本地 K 線 CSV"""
     candles = []
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            candles.append({
-                'time': int(row['time']),
-                'open': float(row['open']),
-                'high': float(row['high']),
-                'low': float(row['low']),
-                'close': float(row['close']),
-                'volume': int(row['volume'])
-            })
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                candles.append({
+                    'time': int(row['time']),
+                    'open': float(row['open']),
+                    'high': float(row['high']),
+                    'low': float(row['low']),
+                    'close': float(row['close']),
+                    'volume': int(float(row['volume']))
+                })
+    except Exception as e:
+        sys.stderr.write(f'[K線] CSV 讀取失敗: {e}\n')
     return candles
 
-def _download_twse_stock_day(ticker, days=60):
-    """
-    從 TWSE STOCK_DAY CSV 下載歷史 K 線
-    網址: https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=csv&date=YYYYMMDD&stockNo=XXXX
-    
-    返回: [{time, open, high, low, close, volume}, ...]
-    """
-    candles = []
-    now = datetime.now()
-    
-    # 優先使用本地手動下載的 CSV
-    local_csv = os.path.join(os.path.dirname(__file__), 'data', 'twse_csv', f'{ticker}.csv')
-    if os.path.exists(local_csv):
-        sys.stderr.write(f'[K線] 使用本地 TWSE CSV: {local_csv}')
-        return _parse_twse_csv(local_csv, days)
-    
-    # 否則嘗試從網路下載（可能超時）
-    # 只嘗試最近 2 個月，避免累積超時
-    dates_to_try = []
-    for i in range(0, 60, 30):
-        date = now - timedelta(days=i)
-        dates_to_try.append(date.strftime('%Y%m%d'))
-    
-    twse_timeout_count = 0
-    for date_str in dates_to_try:
-        url = f'https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=csv&date={date_str}&stockNo={ticker}'
-        
-        try:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            
-            req = urllib.request.Request(url, headers={
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-                'Referer': 'https://www.twse.com.tw/',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            })
-            
-            # 設置超時 10 秒
-            with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
-                content = resp.read().decode('utf-8-sig', errors='ignore')
-            
-            # 解析 CSV
-            lines = content.strip().split('\n')
-            
-            for line in lines:
-                line = line.strip()
-                if not line or line.startswith('日期') or line.startswith('"日期') or line.startswith('說明:'):
-                    continue
-                
-                # 移除 BOM 和引號
-                line = line.replace('\ufeff', '').replace('"', '')
-                
-                # 格式: 113/01/02,45,952,45,952,45,707,45,750,46,177,114,577,381,6,966,508,736
-                parts = line.split(',')
-                
-                if len(parts) < 9:
-                    continue
-                
-                # 解析日期（民國年轉西元年）
-                date_part = parts[0].strip()
-                try:
-                    year_str, month_str, day_str = date_part.split('/')
-                    year = int(year_str) + 1911  # 民國年轉西元年
-                    month = int(month_str)
-                    day = int(day_str)
-                    dt = datetime(year, month, day)
-                    timestamp = int(dt.timestamp())
-                except:
-                    continue
-                
-                # 解析價格（處理千分位逗號）
-                try:
-                    # 開盤價
-                    open_price = float(parts[1].replace(',', '')) if parts[1].strip() else 0
-                    # 最高價
-                    high_price = float(parts[2].replace(',', '')) if len(parts) > 2 and parts[2].strip() else 0
-                    # 最低價
-                    low_price = float(parts[3].replace(',', '')) if len(parts) > 3 and parts[3].strip() else 0
-                    # 收盤價
-                    close_price = float(parts[4].replace(',', '')) if len(parts) > 4 and parts[4].strip() else 0
-                    # 成交股數（千股）→ 成交量（股）
-                    volume_str = parts[8].replace(',', '') if len(parts) > 8 else '0'
-                    volume = int(float(volume_str) * 1000) if volume_str and volume_str != '0' else 0
-                    
-                    if close_price > 0:  # 只保留有收盤價的資料
-                        candles.append({
-                            'time': timestamp,
-                            'open': open_price,
-                            'high': high_price,
-                            'low': low_price,
-                            'close': close_price,
-                            'volume': volume
-                        })
-                except (ValueError, IndexError) as e:
-                    sys.stderr.write(f'[K線] 解析失敗: {line[:50]}... ({e})')
-                    continue
-        
-        except Exception as e:
-            sys.stderr.write(f'[K線] TWSE CSV 下載失敗 ({date_str}): {e}')
-            twse_timeout_count += 1
-            # 連續 2 次超時就放棄
-            if twse_timeout_count >= 2:
-                sys.stderr.write(f'[K線] TWSE 連續超時，停止嘗試')
-                break
-            continue
-    
-    # 按時間排序並去重
-    candles = sorted(candles, key=lambda x: x['time'])
-    unique_candles = []
-    seen_times = set()
-    for c in candles:
-        if c['time'] not in seen_times:
-            seen_times.add(c['time'])
-            unique_candles.append(c)
-    
-    sys.stderr.write(f'[K線] TWSE 下載完成: {len(unique_candles)} 天')
-    return unique_candles[-days:] if unique_candles else []
-
-def _parse_twse_csv(csv_path, days=60):
-    """
-    解析本地 TWSE CSV 檔案
-    格式: 日期,開盤價,最高價,最低價,收盤價,成交股數
-    範例: 113/01/02,45,952,45,952,45,707,45,750,46,177,114,577,381
-    """
-    candles = []
-    
-    with open(csv_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
-        lines = f.readlines()
-    
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith('日期') or line.startswith('"日期') or line.startswith('說明:'):
-            continue
-        
-        # 移除 BOM 和引號
-        line = line.replace('\ufeff', '').replace('"', '')
-        
-        parts = line.split(',')
-        
-        if len(parts) < 9:
-            continue
-        
-        # 解析日期（民國年轉西元年）
-        date_part = parts[0].strip()
-        try:
-            year_str, month_str, day_str = date_part.split('/')
-            year = int(year_str) + 1911  # 民國年轉西元年
-            month = int(month_str)
-            day = int(day_str)
-            dt = datetime(year, month, day)
-            timestamp = int(dt.timestamp())
-        except:
-            continue
-        
-        # 解析價格（處理千分位逗號）
-        try:
-            open_price = float(parts[1].replace(',', '')) if parts[1].strip() else 0
-            high_price = float(parts[2].replace(',', '')) if len(parts) > 2 and parts[2].strip() else 0
-            low_price = float(parts[3].replace(',', '')) if len(parts) > 3 and parts[3].strip() else 0
-            close_price = float(parts[4].replace(',', '')) if len(parts) > 4 and parts[4].strip() else 0
-            volume_str = parts[8].replace(',', '') if len(parts) > 8 else '0'
-            volume = int(float(volume_str) * 1000) if volume_str and volume_str != '0' else 0
-            
-            if close_price > 0:
-                candles.append({
-                    'time': timestamp,
-                    'open': open_price,
-                    'high': high_price,
-                    'low': low_price,
-                    'close': close_price,
-                    'volume': volume
-                })
-        except (ValueError, IndexError) as e:
-            sys.stderr.write(f'[K線] 解析失敗: {line[:50]}... ({e})')
-            continue
-    
-    # 按時間排序
-    candles = sorted(candles, key=lambda x: x['time'])
-    sys.stderr.write(f'[K線] 解析本地 CSV 完成: {len(candles)} 天')
-    return candles[-days:] if candles else []
-
-def _generate_simulated_kline(ticker, days, csv_path):
-    """
-    生成模擬 K 線並保存到 CSV
-    使用隨機漫步 + 今日真實 OHLC（若可獲取）
-    """
-    # 嘗試獲取即時價格作為基準
-    quote = get_realtime_quote(ticker)
-    base_price = quote.get('price', 100.0) if quote.get('success') else 100.0
-    
-    candles = []
-    now = datetime.now()
-    
-    for i in range(days):
-        date = now - timedelta(days=days-i)
-        timestamp = int(date.timestamp())
-        
-        # 隨機漫步
-        change = random.uniform(-0.03, 0.03)
-        price = base_price * (1 + change * (i / days))
-        
-        open_p = price * (1 + random.uniform(-0.01, 0.01))
-        close_p = price * (1 + random.uniform(-0.01, 0.01))
-        high_p = max(open_p, close_p) * (1 + random.uniform(0, 0.02))
-        low_p = min(open_p, close_p) * (1 - random.uniform(0, 0.02))
-        volume = int(random.uniform(5000, 50000))
-        
-        candles.append({
-            'time': timestamp,
-            'open': round(open_p, 2),
-            'high': round(high_p, 2),
-            'low': round(low_p, 2),
-            'close': round(close_p, 2),
-            'volume': volume
-        })
-    
-    # 保存 CSV
+def _save_kline_csv(csv_path, candles):
+    """保存 K 線到 CSV"""
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     with open(csv_path, 'w', encoding='utf-8', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=['time', 'open', 'high', 'low', 'close', 'volume'])
         writer.writeheader()
         writer.writerows(candles)
+
+def _deduplicate_sort(candles):
+    """去重 + 排序"""
+    seen = {}
+    for c in candles:
+        seen[c['time']] = c
+    return sorted(seen.values(), key=lambda x: x['time'])
+
+def _generate_simulated_kline(ticker, days, csv_path):
+    """生成模擬 K 線並保存"""
+    quote = get_realtime_quote(ticker)
+    base_price = quote.get('price', 100.0) if quote.get('success') else 100.0
     
-    sys.stderr.write(f'[K線] 已生成並保存: {csv_path}')
+    candles = []
+    now = datetime.now()
+    price = base_price * 0.95  # 從稍低的價格開始
+    
+    for i in range(days):
+        date = now - timedelta(days=days - i)
+        if date.weekday() >= 5:
+            continue
+        timestamp = int(date.replace(hour=0, minute=0, second=0).timestamp())
+        change = random.gauss(0, 0.015)
+        price = price * (1 + change)
+        high = price * (1 + random.uniform(0, 0.01))
+        low = price * (1 - random.uniform(0, 0.01))
+        vol = int(random.uniform(5000, 50000))
+        candles.append({
+            'time': timestamp,
+            'open': round(price * (1 - random.uniform(0, 0.005)), 2),
+            'high': round(high, 2),
+            'low': round(low, 2),
+            'close': round(price, 2),
+            'volume': vol
+        })
+    
+    _save_kline_csv(csv_path, candles)
+    sys.stderr.write(f'[K線] 模擬數據已保存: {csv_path}\n')
     return candles
 
 # ============================================
-# 2. 即時報價 (TWSE MIS API)
+# 3. 批量更新歷史 K 線（從 OpenAPI 取多天數據）
+# ============================================
+
+def batch_update_from_openapi(tickers=None):
+    """
+    批量從 OpenAPI 取得當日數據並更新本地 CSV
+    用於每日定時任務（13:30 收盤後）
+    
+    參數:
+      tickers: 股票代碼列表，None 表示取全部上市股票
+    返回:
+      { success, updated, total, errors }
+    """
+    data = _fetch_stock_day_all()
+    if not data:
+        return {'success': False, 'error': 'OpenAPI 無數據'}
+    
+    csv_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'historical')
+    os.makedirs(csv_dir, exist_ok=True)
+    
+    updated = 0
+    errors = 0
+    total = 0
+    
+    # 篩選目標股票
+    target_codes = set(t.replace('.TW', '') for t in (tickers or []))
+    
+    for row in data:
+        code = row.get('Code', '')
+        
+        # 如果有指定 tickers，只處理那些
+        if target_codes and code not in target_codes:
+            continue
+        
+        close = _safe_float(row.get('ClosingPrice'))
+        if close <= 0:
+            continue
+        
+        total += 1
+        dt = _roc_to_ad(row.get('Date', ''))
+        if not dt:
+            continue
+        
+        timestamp = int(dt.timestamp())
+        csv_path = os.path.join(csv_dir, f'{code}.csv')
+        
+        # 讀取現有 CSV
+        candles = _read_kline_csv(csv_path) if os.path.exists(csv_path) else []
+        
+        # 檢查今天是否已有
+        already_has = any(c['time'] == timestamp for c in candles)
+        
+        new_candle = {
+            'time': timestamp,
+            'open': _safe_float(row.get('OpeningPrice')),
+            'high': _safe_float(row.get('HighestPrice')),
+            'low': _safe_float(row.get('LowestPrice')),
+            'close': close,
+            'volume': int(_safe_float(row.get('TradeVolume')))
+        }
+        
+        if already_has:
+            # 更新
+            for i, c in enumerate(candles):
+                if c['time'] == timestamp:
+                    candles[i] = new_candle
+                    break
+        else:
+            candles.append(new_candle)
+        
+        # 去重排序保存
+        candles = _deduplicate_sort(candles)
+        _save_kline_csv(csv_path, candles)
+        updated += 1
+    
+    return {
+        'success': True,
+        'updated': updated,
+        'total': total,
+        'errors': errors,
+        'date': datetime.now().isoformat()
+    }
+
+# ============================================
+# 4. 即時報價 (TWSE MIS API)
 # ============================================
 
 def get_realtime_quote(ticker):
-    """
-    獲取即時報價（TWSE MIS API）
-    返回: { success, price, change, changePercent, volume, ... }
-    """
+    """獲取即時報價（TWSE MIS API）"""
     ticker = ticker.replace('.TW', '')
     url = f'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_{ticker}.tw&json=1&delay=0'
     
-    ctx = ssl.create_default_context()
-    req = urllib.request.Request(url, headers={
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': 'https://mis.twse.com.tw/'
-    })
-    
     try:
-        with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-        
-        if data.get('msgArray') and len(data['msgArray']) > 0:
+        data = _fetch_json(url, timeout=8)
+        if data and data.get('msgArray') and len(data['msgArray']) > 0:
             msg = data['msgArray'][0]
             z = float(msg.get('z', 0))
             y = float(msg.get('y', 0))
@@ -342,30 +375,56 @@ def get_realtime_quote(ticker):
                 'open': float(msg.get('o', 0)),
                 'source': 'twse'
             }
-    except Exception as e:
+    except:
         pass
     
-    return { 'success': False, 'ticker': ticker }
+    return {'success': False, 'ticker': ticker}
 
 # ============================================
-# 3. 更新當日 K 線（每日 13:30 收盤後呼叫）
+# 5. 更新當日 K 線
 # ============================================
 
 def update_daily_kline(ticker):
-    """
-    更新當日 K 線到本地 CSV
-    應在每個交易日 13:30 後呼叫（收盤後）
-    """
+    """更新當日 K 線到本地 CSV"""
     ticker = ticker.replace('.TW', '')
-    csv_path = os.path.join(os.path.dirname(__file__), 'data', 'historical', f'{ticker}.csv')
+    csv_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'historical')
+    csv_path = os.path.join(csv_dir, f'{ticker}.csv')
     
-    # 獲取即時 OHLC
+    # 優先從 OpenAPI 取（更穩定）
+    today = _get_today_from_openapi(ticker)
+    if today and today['timestamp'] > 0:
+        candles = _read_kline_csv(csv_path) if os.path.exists(csv_path) else []
+        already_has = any(c['time'] == today['timestamp'] for c in candles)
+        
+        new_candle = {
+            'time': today['timestamp'],
+            'open': today['open'],
+            'high': today['high'],
+            'low': today['low'],
+            'close': today['close'],
+            'volume': today['volume']
+        }
+        
+        if already_has:
+            for i, c in enumerate(candles):
+                if c['time'] == today['timestamp']:
+                    candles[i] = new_candle
+                    break
+        else:
+            candles.append(new_candle)
+        
+        candles = _deduplicate_sort(candles)
+        os.makedirs(csv_dir, exist_ok=True)
+        _save_kline_csv(csv_path, candles)
+        return {'success': True, 'candle': new_candle, 'total': len(candles), 'source': 'openapi'}
+    
+    # Fallback: MIS API
     quote = get_realtime_quote(ticker)
     if not quote.get('success'):
-        return { 'success': False, 'error': '無法獲取即時報價' }
+        return {'success': False, 'error': '無法獲取即時報價'}
     
-    today = datetime.now().date()
-    timestamp = int(datetime.combine(today, datetime.min.time()).timestamp())
+    today_date = datetime.now().date()
+    timestamp = int(datetime.combine(today_date, datetime.min.time()).timestamp())
     
     new_candle = {
         'time': timestamp,
@@ -376,43 +435,91 @@ def update_daily_kline(ticker):
         'volume': quote['volume']
     }
     
-    # 讀取現有 CSV 並附加
     candles = _read_kline_csv(csv_path) if os.path.exists(csv_path) else []
     
-    # 檢查今天是否已有資料
     if candles and candles[-1]['time'] == timestamp:
-        candles[-1] = new_candle  # 更新
+        candles[-1] = new_candle
     else:
-        candles.append(new_candle)  # 新增
+        candles.append(new_candle)
     
-    # 保存
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['time', 'open', 'high', 'low', 'close', 'volume'])
-        writer.writeheader()
-        writer.writerows(candles)
-    
-    return { 'success': True, 'candle': new_candle, 'total': len(candles) }
+    candles = _deduplicate_sort(candles)
+    os.makedirs(csv_dir, exist_ok=True)
+    _save_kline_csv(csv_path, candles)
+    return {'success': True, 'candle': new_candle, 'total': len(candles), 'source': 'mis_api'}
 
 # ============================================
-# 4. CLI 測試
+# 6. 獲取漲跌家數（從 OpenAPI STOCK_DAY_ALL 計算）
+# ============================================
+
+def get_advance_decline():
+    """
+    從 STOCK_DAY_ALL 計算上漲/下跌/平盤家數
+    返回: { advance, decline, unchanged, total }
+    """
+    data = _fetch_stock_day_all()
+    if not data:
+        return None
+    
+    advance = 0
+    decline = 0
+    unchanged = 0
+    total_valid = 0
+    
+    for row in data:
+        close = _safe_float(row.get('ClosingPrice'))
+        open_p = _safe_float(row.get('OpeningPrice'))
+        change_sign = row.get('ChangeSign', '')
+        
+        if close <= 0 or open_p <= 0:
+            continue
+        
+        total_valid += 1
+        
+        # 用 ChangeSign 判斷（如果有的話）
+        # 或者用收盤 vs 開盤
+        # OpenAPI 的 Change 不一定存在，用 close vs open 比較可靠
+        if close > open_p:
+            advance += 1
+        elif close < open_p:
+            decline += 1
+        else:
+            unchanged += 1
+    
+    return {
+        'advance': advance,
+        'decline': decline,
+        'unchanged': unchanged,
+        'total': total_valid
+    }
+
+# ============================================
+# 7. CLI 測試
 # ============================================
 
 if __name__ == '__main__':
-    import sys
-    
     if len(sys.argv) < 2:
-        print('用法: python3 market_data.py <ticker> [update]')
-        print('  python3 market_data.py 2330        # 查詢歷史 K 線（輸出 JSON）')
-        print('  python3 market_data.py 2330 update # 更新當日 K 線')
+        print('用法:')
+        print('  python3 market_data.py <ticker>          # 查詢歷史 K 線 (JSON)')
+        print('  python3 market_data.py <ticker> update    # 更新當日 K 線')
+        print('  python3 market_data.py batch              # 批量更新全部股票')
+        print('  python3 market_data.py advance-decline    # 漲跌家數')
         sys.exit(1)
     
-    ticker = sys.argv[1]
+    cmd = sys.argv[1]
     
-    if 'update' in sys.argv:
+    if cmd == 'batch':
+        result = batch_update_from_openapi()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif cmd == 'advance-decline':
+        result = get_advance_decline()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif cmd == 'update' or (len(sys.argv) > 2 and sys.argv[2] == 'update'):
+        ticker = cmd if cmd != 'update' else sys.argv[2]
+        if ticker == 'update':
+            ticker = sys.argv[1]
         result = update_daily_kline(ticker)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
+        ticker = cmd
         candles = get_historical_kline(ticker, days=60)
-        # 輸出 JSON 陣列（供 server.js 解析）
         print(json.dumps(candles, ensure_ascii=False))

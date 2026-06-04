@@ -1498,7 +1498,7 @@ app.get('/api/market/overview', async (req, res) => {
       let resolved = false;
       const timer = setTimeout(() => {
         if (!resolved) { resolved = true; python.kill(); resolve({ success: false, error: '大盤概覽超時' }); }
-      }, 15000);
+      }, 30000);
       python.stdout.on('data', (chunk) => { data += chunk; });
       python.stderr.on('data', () => {});
       python.on('close', (code) => {
