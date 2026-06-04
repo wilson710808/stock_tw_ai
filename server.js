@@ -1411,22 +1411,57 @@ function round(num, decimals = 2) {
 
 // 市場指數 API（台股指數）
 app.get('/api/market/indices', async (req, res) => {
-  // 台股指數：加權指數(^TWII)、電子指數、金融指數
-  // Yahoo Finance ticker 格式：^TWII (加權)、^TELI (電子)、^TFNI (金融)
-  const indices = ['^TWII', '^TELI', '^TFNI'];
+  // 台股指數：加權指數、電子指數、金融指數
+  // 使用 TWSE MIS API 獲取即時指數
+  const indexMap = {
+    'TAIEX': { ex_ch: 'tse_t00.tw', name: '加權指數', ticker: '^TWII' },
+    'TELI': { ex_ch: 'tse_t13.tw', name: '電子類指數', ticker: '^TELI' },
+    'TFNI': { ex_ch: 'tse_t17.tw', name: '金融保險類', ticker: '^TFNI' },
+  };
   const results = [];
-  for (const t of indices) {
-    const r = await getStockPricePython(t);
+  
+  for (const [key, info] of Object.entries(indexMap)) {
+    try {
+      const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${info.ex_ch}&json=1&delay=0`;
+      const resp = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://mis.twse.com.tw/' }
+      });
+      const data = await resp.json();
+      if (data.msgArray && data.msgArray.length > 0) {
+        const msg = data.msgArray[0];
+        const z = msg.z && msg.z !== '-' ? parseFloat(msg.z) : 0;
+        const y = msg.y && msg.y !== '-' ? parseFloat(msg.y) : 0;
+        const o = msg.o && msg.o !== '-' ? parseFloat(msg.o) : 0;
+        const h = msg.h && msg.h !== '-' ? parseFloat(msg.h) : 0;
+        const l = msg.l && msg.l !== '-' ? parseFloat(msg.l) : 0;
+        const change = y > 0 ? z - y : 0;
+        const pct = y > 0 ? (change / y * 100) : 0;
+        if (z > 0) {
+          results.push({
+            ticker: info.ticker, name: info.name,
+            success: true, price: z, prevClose: y,
+            open: o, high: h, low: l,
+            change: Math.round(change * 100) / 100,
+            changePercent: Math.round(pct * 100) / 100,
+            source: 'twse', timestamp: Date.now()
+          });
+          continue;
+        }
+      }
+    } catch (e) { /* TWSE failed, try fallback */ }
+    
+    // Fallback: try Yahoo
+    const r = await getStockPricePython(info.ticker);
     if (r && r.success && r.price && !r.error) {
-      results.push({ ticker: t, ...r });
+      results.push({ ticker: info.ticker, ...r });
     } else {
       const fallback = {
         '^TWII': { name: '加權指數', price: 21500.00, change: 85.20, changePercent: 0.40 },
         '^TELI': { name: '電子指數', price: 1125.50, change: 12.30, changePercent: 1.10 },
         '^TFNI': { name: '金融指數', price: 2185.80, change: -8.50, changePercent: -0.39 },
       };
-      const fb = fallback[t];
-      if (fb) results.push({ ticker: t, ...fb, source: 'demo', timestamp: Date.now() });
+      const fb = fallback[info.ticker];
+      if (fb) results.push({ ticker: info.ticker, ...fb, source: 'demo', timestamp: Date.now() });
     }
   }
   res.json({ success: true, indices: results });
