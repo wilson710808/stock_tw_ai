@@ -24,7 +24,7 @@
             '<div class="modal-info">記錄買入的股票持倉</div>' +
             
             '<div class="modal-label">股票代碼</div>' +
-            '<input class="modal-input" id="buyTicker" value="' + t + '" placeholder="AAPL" style="text-transform:uppercase">' +
+            '<input class="modal-input" id="buyTicker" value="' + t + '" placeholder="2330" style="text-transform:uppercase">' +
             
             '<div class="modal-label">買入價格</div>' +
             '<input class="modal-input" type="number" id="buyPrice" step="0.01" value="' + (p ? p.toFixed(2) : '') + '" placeholder="0.00" oninput="updateBuyCost()">' +
