@@ -153,6 +153,5 @@ if __name__ == '__main__':
     import sys
     import json
     
-    print('=== 台股大盤概覽 ===')
     overview = get_market_overview()
     print(json.dumps(overview, ensure_ascii=False, indent=2))

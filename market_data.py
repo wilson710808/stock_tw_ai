@@ -13,6 +13,7 @@ market_data.py - 台股數據獲取模組（本地優先 + TWSE CSV 歷史 K 線
 """
 
 import json
+import sys
 import csv
 import os
 import urllib.request
@@ -38,11 +39,11 @@ def get_historical_kline(ticker, days=60):
     
     # 1. 嘗試讀取本地 CSV
     if os.path.exists(csv_path):
-        print(f'[K線] 從本地 CSV 讀取: {ticker}')
+        sys.stderr.write(f'[K線] 從本地 CSV 讀取: {ticker}')
         return _read_kline_csv(csv_path)
     
     # 2. 從 TWSE STOCK_DAY 下載
-    print(f'[K線] 本地 CSV 不存在，從 TWSE 下載: {ticker}')
+    sys.stderr.write(f'[K線] 本地 CSV 不存在，從 TWSE 下載: {ticker}')
     candles = _download_twse_stock_day(ticker, days)
     if candles and len(candles) > 0:
         # 保存到本地 CSV
@@ -51,11 +52,11 @@ def get_historical_kline(ticker, days=60):
             writer = csv.DictWriter(f, fieldnames=['time', 'open', 'high', 'low', 'close', 'volume'])
             writer.writeheader()
             writer.writerows(candles)
-        print(f'[K線] TWSE CSV 下載成功並保存: {csv_path} ({len(candles)} 天)')
+        sys.stderr.write(f'[K線] TWSE CSV 下載成功並保存: {csv_path} ({len(candles)} 天)')
         return candles
     
     # 3. 失敗 → 生成模擬數據
-    print(f'[K線] TWSE CSV 下載失敗，生成模擬數據: {ticker}')
+    sys.stderr.write(f'[K線] TWSE CSV 下載失敗，生成模擬數據: {ticker}')
     return _generate_simulated_kline(ticker, days, csv_path)
 
 def _read_kline_csv(csv_path):
@@ -87,15 +88,17 @@ def _download_twse_stock_day(ticker, days=60):
     # 優先使用本地手動下載的 CSV
     local_csv = os.path.join(os.path.dirname(__file__), 'data', 'twse_csv', f'{ticker}.csv')
     if os.path.exists(local_csv):
-        print(f'[K線] 使用本地 TWSE CSV: {local_csv}')
+        sys.stderr.write(f'[K線] 使用本地 TWSE CSV: {local_csv}')
         return _parse_twse_csv(local_csv, days)
     
     # 否則嘗試從網路下載（可能超時）
+    # 只嘗試最近 2 個月，避免累積超時
     dates_to_try = []
-    for i in range(0, min(days, 90), 30):
+    for i in range(0, 60, 30):
         date = now - timedelta(days=i)
         dates_to_try.append(date.strftime('%Y%m%d'))
     
+    twse_timeout_count = 0
     for date_str in dates_to_try:
         url = f'https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=csv&date={date_str}&stockNo={ticker}'
         
@@ -167,11 +170,16 @@ def _download_twse_stock_day(ticker, days=60):
                             'volume': volume
                         })
                 except (ValueError, IndexError) as e:
-                    print(f'[K線] 解析失敗: {line[:50]}... ({e})')
+                    sys.stderr.write(f'[K線] 解析失敗: {line[:50]}... ({e})')
                     continue
         
         except Exception as e:
-            print(f'[K線] TWSE CSV 下載失敗 ({date_str}): {e}')
+            sys.stderr.write(f'[K線] TWSE CSV 下載失敗 ({date_str}): {e}')
+            twse_timeout_count += 1
+            # 連續 2 次超時就放棄
+            if twse_timeout_count >= 2:
+                sys.stderr.write(f'[K線] TWSE 連續超時，停止嘗試')
+                break
             continue
     
     # 按時間排序並去重
@@ -183,7 +191,7 @@ def _download_twse_stock_day(ticker, days=60):
             seen_times.add(c['time'])
             unique_candles.append(c)
     
-    print(f'[K線] TWSE 下載完成: {len(unique_candles)} 天')
+    sys.stderr.write(f'[K線] TWSE 下載完成: {len(unique_candles)} 天')
     return unique_candles[-days:] if unique_candles else []
 
 def _parse_twse_csv(csv_path, days=60):
@@ -241,12 +249,12 @@ def _parse_twse_csv(csv_path, days=60):
                     'volume': volume
                 })
         except (ValueError, IndexError) as e:
-            print(f'[K線] 解析失敗: {line[:50]}... ({e})')
+            sys.stderr.write(f'[K線] 解析失敗: {line[:50]}... ({e})')
             continue
     
     # 按時間排序
     candles = sorted(candles, key=lambda x: x['time'])
-    print(f'[K線] 解析本地 CSV 完成: {len(candles)} 天')
+    sys.stderr.write(f'[K線] 解析本地 CSV 完成: {len(candles)} 天')
     return candles[-days:] if candles else []
 
 def _generate_simulated_kline(ticker, days, csv_path):
@@ -291,7 +299,7 @@ def _generate_simulated_kline(ticker, days, csv_path):
         writer.writeheader()
         writer.writerows(candles)
     
-    print(f'[K線] 已生成並保存: {csv_path}')
+    sys.stderr.write(f'[K線] 已生成並保存: {csv_path}')
     return candles
 
 # ============================================

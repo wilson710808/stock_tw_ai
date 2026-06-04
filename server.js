@@ -745,9 +745,21 @@ app.get('/api/chart/:ticker', async (req, res) => {
   const result = await new Promise((resolve) => {
     const python = spawn('python3', [path.join(__dirname, 'market_data.py'), ticker]);
     let data = '';
+    let resolved = false;
+    // 設定 15 秒超時
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        python.kill();
+        resolve({ success: false, error: 'market_data.py 超時（15秒）' });
+      }
+    }, 15000);
     python.stdout.on('data', (chunk) => { data += chunk; });
-    python.stderr.on('data', (chunk) => { console.error('K線錯誤:', chunk.toString()); });
+    python.stderr.on('data', (chunk) => { console.error('K線:', chunk.toString()); });
     python.on('close', (code) => {
+      clearTimeout(timer);
+      if (resolved) return;
+      resolved = true;
       if (code === 0 && data) {
         try {
           const candles = JSON.parse(data);
@@ -1475,6 +1487,36 @@ app.get('/api/market/indices', async (req, res) => {
     }
   }
   res.json({ success: true, indices: results });
+});
+
+// 市場大盤概覽 API
+app.get('/api/market/overview', async (req, res) => {
+  try {
+    const result = await new Promise((resolve) => {
+      const python = spawn('python3', [path.join(__dirname, 'market_overview.py')]);
+      let data = '';
+      let resolved = false;
+      const timer = setTimeout(() => {
+        if (!resolved) { resolved = true; python.kill(); resolve({ success: false, error: '大盤概覽超時' }); }
+      }, 15000);
+      python.stdout.on('data', (chunk) => { data += chunk; });
+      python.stderr.on('data', () => {});
+      python.on('close', (code) => {
+        clearTimeout(timer);
+        if (resolved) return;
+        resolved = true;
+        if (code === 0 && data) {
+          try { resolve(JSON.parse(data)); }
+          catch (e) { resolve({ success: false, error: '解析失敗' }); }
+        } else {
+          resolve({ success: false, error: 'market_overview.py 執行失敗' });
+        }
+      });
+    });
+    res.json(result);
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
 });
 
 // 推薦股票 API

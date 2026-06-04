@@ -108,6 +108,7 @@ function authMiddleware(req, res, next) {
         '/api/quote',
         '/api/quotes',
         '/api/market/indices',
+        '/api/market/overview',
         '/api/recommend',
         '/favicon.ico',
         '/',
