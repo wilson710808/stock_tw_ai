@@ -84,7 +84,13 @@ def _download_twse_stock_day(ticker, days=60):
     candles = []
     now = datetime.now()
     
-    # 嘗試下載最近 60 天的數據（每次下載一個月）
+    # 優先使用本地手動下載的 CSV
+    local_csv = os.path.join(os.path.dirname(__file__), 'data', 'twse_csv', f'{ticker}.csv')
+    if os.path.exists(local_csv):
+        print(f'[K線] 使用本地 TWSE CSV: {local_csv}')
+        return _parse_twse_csv(local_csv, days)
+    
+    # 否則嘗試從網路下載（可能超時）
     dates_to_try = []
     for i in range(0, min(days, 90), 30):
         date = now - timedelta(days=i)
@@ -179,6 +185,69 @@ def _download_twse_stock_day(ticker, days=60):
     
     print(f'[K線] TWSE 下載完成: {len(unique_candles)} 天')
     return unique_candles[-days:] if unique_candles else []
+
+def _parse_twse_csv(csv_path, days=60):
+    """
+    解析本地 TWSE CSV 檔案
+    格式: 日期,開盤價,最高價,最低價,收盤價,成交股數
+    範例: 113/01/02,45,952,45,952,45,707,45,750,46,177,114,577,381
+    """
+    candles = []
+    
+    with open(csv_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
+        lines = f.readlines()
+    
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('日期') or line.startswith('"日期') or line.startswith('說明:'):
+            continue
+        
+        # 移除 BOM 和引號
+        line = line.replace('\ufeff', '').replace('"', '')
+        
+        parts = line.split(',')
+        
+        if len(parts) < 9:
+            continue
+        
+        # 解析日期（民國年轉西元年）
+        date_part = parts[0].strip()
+        try:
+            year_str, month_str, day_str = date_part.split('/')
+            year = int(year_str) + 1911  # 民國年轉西元年
+            month = int(month_str)
+            day = int(day_str)
+            dt = datetime(year, month, day)
+            timestamp = int(dt.timestamp())
+        except:
+            continue
+        
+        # 解析價格（處理千分位逗號）
+        try:
+            open_price = float(parts[1].replace(',', '')) if parts[1].strip() else 0
+            high_price = float(parts[2].replace(',', '')) if len(parts) > 2 and parts[2].strip() else 0
+            low_price = float(parts[3].replace(',', '')) if len(parts) > 3 and parts[3].strip() else 0
+            close_price = float(parts[4].replace(',', '')) if len(parts) > 4 and parts[4].strip() else 0
+            volume_str = parts[8].replace(',', '') if len(parts) > 8 else '0'
+            volume = int(float(volume_str) * 1000) if volume_str and volume_str != '0' else 0
+            
+            if close_price > 0:
+                candles.append({
+                    'time': timestamp,
+                    'open': open_price,
+                    'high': high_price,
+                    'low': low_price,
+                    'close': close_price,
+                    'volume': volume
+                })
+        except (ValueError, IndexError) as e:
+            print(f'[K線] 解析失敗: {line[:50]}... ({e})')
+            continue
+    
+    # 按時間排序
+    candles = sorted(candles, key=lambda x: x['time'])
+    print(f'[K線] 解析本地 CSV 完成: {len(candles)} 天')
+    return candles[-days:] if candles else []
 
 def _generate_simulated_kline(ticker, days, csv_path):
     """
